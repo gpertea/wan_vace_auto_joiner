@@ -541,9 +541,45 @@ def apply_all_transition_smoothing(frames: List[np.ndarray],
 # Audio Transfer Functions
 # =============================================================================
 
-def extract_audio_from_videos(video_paths: List[str], output_audio_path: str) -> bool:
+def ffprobe_metadata(video_path: str, entries: str) -> Dict[str, Any]:
+    result = subprocess.run([
+        'ffprobe',
+        '-v', 'error',
+        '-show_entries', entries,
+        '-of', 'json',
+        video_path,
+    ], capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+def source_video_duration(video_path: str, fps: float) -> float:
+    metadata = ffprobe_metadata(
+        video_path,
+        'format=duration:stream=codec_type,duration,nb_frames,avg_frame_rate',
+    )
+    video_stream = next(
+        (stream for stream in metadata.get('streams', []) if stream.get('codec_type') == 'video'),
+        {},
+    )
+    if fps > 0 and video_stream.get('nb_frames'):
+        try:
+            return int(video_stream['nb_frames']) / fps
+        except ValueError:
+            pass
+    for source in (video_stream, metadata.get('format', {})):
+        if source.get('duration'):
+            return float(source['duration'])
+    raise RuntimeError(f"Unable to determine video duration for {video_path}")
+
+
+def source_has_audio(video_path: str) -> bool:
+    metadata = ffprobe_metadata(video_path, 'stream=codec_type')
+    return any(stream.get('codec_type') == 'audio' for stream in metadata.get('streams', []))
+
+
+def extract_audio_from_videos(video_paths: List[str], output_audio_path: str, fps: float = 24.0) -> bool:
     """
-    Extract and concatenate audio from multiple videos using ffmpeg.
+    Extract, duration-match, and concatenate audio from multiple videos.
     
     Args:
         video_paths: List of input video file paths
@@ -568,19 +604,32 @@ def extract_audio_from_videos(video_paths: List[str], output_audio_path: str) ->
             if not os.path.exists(video_path):
                 continue
             
-            # Extract to WAV format for easy tensor loading
+            segment_duration = source_video_duration(video_path, fps)
             temp_audio = output_audio_path.replace('.wav', f'_temp_{i}.wav')
-            temp_audio_files.append(temp_audio)
-            
-            cmd = [
-                'ffmpeg', '-y', '-i', video_path,
-                '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
-                temp_audio
-            ]
+            if source_has_audio(video_path):
+                cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-vn',
+                    '-af',
+                    f'aresample=44100:async=1:first_pts=0,apad,atrim=0:{segment_duration:.6f},asetpts=PTS-STARTPTS',
+                    '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
+                    temp_audio
+                ]
+            else:
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'lavfi',
+                    '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+                    '-t', f'{segment_duration:.6f}',
+                    '-acodec', 'pcm_s16le',
+                    temp_audio
+                ]
             result = subprocess.run(cmd, capture_output=True)
             
-            if result.returncode != 0:
-                temp_audio_files.pop()
+            if result.returncode == 0 and os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 0:
+                temp_audio_files.append(temp_audio)
+            elif os.path.exists(temp_audio):
+                os.remove(temp_audio)
         
         if not temp_audio_files:
             return False
@@ -1292,7 +1341,7 @@ class WanVaceAutoJoinerFinalize:
             # Use WAV format for easy tensor loading
             audio_output_path = os.path.join(temp_folder, "combined_audio.wav")
             
-            if extract_audio_from_videos(video_paths, audio_output_path):
+            if extract_audio_from_videos(video_paths, audio_output_path, fps=fps):
                 # Load audio as tensor
                 audio_output = load_audio_as_tensor(audio_output_path)
                 
