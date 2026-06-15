@@ -1,215 +1,209 @@
-# WAN VACE Auto Joiner v2.0.0 (ComfyUI Custom Nodes)
+# WAN VACE Auto Joiner for ComfyUI
 
-Seamlessly join multiple video clips in a folder using **WAN VACE** and **ComfyUI Easy-Use For Loop** automation — with **one-click solution**.
+Join a numbered folder of video clips with WAN VACE transition frames, optional
+color/luminosity correction, and audio preservation.
 
-This node set ensures:
+The recommended workflow uses the direct video finalizer:
 
-* VACE runs **exactly N-1 times** for **N input videos**
-* **Seamless transitions** with automatic color/brightness correction
-* **Audio preservation** from original clips
-* Finalization runs **once**, after the loop completes
+```text
+easy forLoopStart -> WanVaceAutoJoiner -> WAN VACE -> VAEDecode
+                  -> WanVaceAutoJoinerSave -> easy forLoopEnd
+easy forLoopEnd -> WanVaceAutoJoinerFinalizeVideo -> final MP4
+```
 
-Nodes appear under: **WAN VACE / Auto Joiner**
+For `N` source clips, VACE runs exactly `N - 1` times.
 
----
+## What Changed
 
-## 🆕 What's New in v2.0.0
-
-### Seamless Transitions
-VACE can introduce brightness/color shifts at transition boundaries. v2.0.0 automatically corrects this with:
-
-- **Temporal Color Smoothing** — Gaussian + linear interpolation across transition regions
-- **Per-Channel Correction** — Independent R, G, B adjustment for accurate color matching
-- **Dynamic Calculation** — All correction values computed from your actual source frames (no hardcoded values)
-
-### Audio Support
-- **Automatic Audio Transfer** — Extracts and concatenates audio from all source clips
-- **Direct Video Combine Integration** — Standard ComfyUI `AUDIO` output connects directly to VHS Video Combine
-- **Fail-Safe Handling** — Generates silent audio track when source clips have no audio (prevents workflow errors)
-
----
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| ✅ One-click batch joining | Process unlimited video clips automatically |
-| ✅ Seamless transitions | No visible brightness/color jumps between clips |
-| ✅ Audio preservation | Original audio transferred to final output |
-| ✅ Loop barrier system | Prevents early exit & race conditions |
-| ✅ Clean lifecycle | INIT → PROCESS → FINALIZE |
-| ✅ Security | Input sanitization prevents path traversal |
-
----
+- Added `WanVaceAutoJoinerFinalizeVideo`, the recommended finalizer for long
+  assemblies. It writes an MP4 directly with ffmpeg instead of returning every
+  frame as a ComfyUI `IMAGE` tensor.
+- Added `recover_assembly_video.py` for finishing an interrupted run from the
+  temp PNG folder outside ComfyUI.
+- Added transition correction controls for overall adaptation, luminosity, and
+  chroma/color drift.
+- Added a memory guard to the legacy `WanVaceAutoJoinerFinalize` node so it
+  fails with a clear message instead of exhausting system RAM.
 
 ## Requirements
 
 | Requirement | Notes |
-|-------------|-------|
-| **ComfyUI** | Base requirement |
-| **ComfyUI-Easy-Use** | Required for For Loop nodes |
-| **WAN VACE workflow** | Your existing VACE setup |
-| **ffmpeg** | Required for audio features (optional) |
-| **scipy** | Recommended for best smoothing (optional, has numpy fallback) |
+| --- | --- |
+| ComfyUI | Base runtime |
+| ComfyUI-Easy-Use | Required for `easy forLoopStart` and `easy forLoopEnd` |
+| WAN VACE workflow | Your existing VACE model and sampler setup |
+| ffmpeg | Required for direct video output and audio transfer |
+| scipy | Optional; smoothing falls back to numpy when missing |
 
----
+## Nodes
 
-## Installation
+Nodes appear under `WAN VACE / Auto Joiner`.
 
-### Option 1 — ComfyUI-Manager (Recommended)
+| Class | Display name | Where to place it | Purpose |
+| --- | --- | --- | --- |
+| `WanVaceAutoJoiner` | WAN VACE Auto Joiner | Inside loop | Creates the next 33-frame VACE control batch and writes source frames to temp PNGs |
+| `WanVaceAutoJoinerSave` | WAN VACE Auto Joiner - Save | Inside loop, after `VAEDecode` | Saves each VACE output batch to disk and acts as the loop barrier |
+| `WanVaceAutoJoinerFinalizeVideo` | WAN VACE Auto Joiner - Finalize Video | After `easy forLoopEnd` | Recommended finalizer; writes corrected MP4 directly |
+| `WanVaceAutoJoinerFinalize` | WAN VACE Auto Joiner - Finalize | After `easy forLoopEnd` | Legacy small-job finalizer; returns `IMAGE`, `AUDIO`, and `frame_rate` for Video Combine |
 
-1. Open **ComfyUI → Manager**
-2. Go to **Install Custom Nodes**
-3. Search for **Wan Vace Auto Joiner**
-4. Install and restart ComfyUI
+## Example Workflows
 
-### Option 2 — Manual Install
+The `examples/` folder contains:
 
-```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/Rhovanx/wan_vace_auto_joiner.git
-```
+- `Wan Vace Auto Joiner WF_new_finalize.json`: recommended workflow using
+  `WanVaceAutoJoinerFinalizeVideo`.
+- `Wan Vace Auto Joiner WF.json`: legacy workflow using
+  `WanVaceAutoJoinerFinalize` and VHS Video Combine.
 
-Restart ComfyUI.
+Use the `_new_finalize` workflow for large batches or high-resolution clips.
 
-### Optional Dependencies
+## Input File Naming
 
-```bash
-# For best color smoothing results
-pip install scipy
+All clips must be in one folder and use a numeric suffix:
 
-# For audio features (check if already installed)
-ffmpeg -version
-```
-
----
-
-## The Three Nodes
-
-| Node | Display Name | Location | Purpose |
-|------|--------------|----------|---------|
-| `WanVaceAutoJoiner` | WAN VACE Auto Joiner | Inside loop | INIT (first iteration) / PROCESS (subsequent) |
-| `WanVaceAutoJoinerSave` | WAN VACE Auto Joiner – Save | Inside loop | Saves VACE output, acts as loop barrier |
-| `WanVaceAutoJoinerFinalize` | WAN VACE Auto Joiner – Finalize | After loop | Applies smoothing, outputs frames + audio |
-| `WanVaceAutoJoinerFinalizeVideo` | WAN VACE Auto Joiner – Finalize Video | After loop | Large-job path: streams corrected PNGs directly to MP4 |
-
----
-
-## Finalize Node Options (v2.0.0)
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `smooth_transitions` | ✅ True | Enable temporal color smoothing |
-| `smooth_window` | 12 | Gaussian sigma (1-30, higher = smoother) |
-| `blend_region` | 25 | Context frames before/after VACE (10-50) |
-| `correction_strength` | 0.75 | Overall color/luminosity correction strength |
-| `luma_strength` | 0.75 | Brightness/luminosity matching strength |
-| `chroma_strength` | 0.60 | Per-channel color/saturation matching strength |
-| `max_tensor_gb` | 16 | Safety limit for legacy IMAGE tensor output |
-| `transfer_audio` | ✅ True | Extract audio from source clips |
-| `cleanup` | ❌ False | Delete temp folder after completion |
-
-> For long assemblies, use `WanVaceAutoJoinerFinalizeVideo` instead of the legacy
-> Finalize → Video Combine path. The legacy node must return every frame as a
-> ComfyUI `IMAGE` tensor; tens of 768x1168 clips can require more than 100 GiB
-> just for the output tensor.
-
----
-
-## Output Connections
-
-```
-WAN VACE Auto Joiner - Finalize
-├── batch_images ────→ Video Combine (images)
-├── audio ───────────→ Video Combine (audio)
-├── frame_rate ──────→ Video Combine (frame_rate)
-├── status ──────────→ (optional debug output)
-└── is_complete ─────→ (optional boolean flag)
-```
-
-For large jobs:
-
-```
-For Loop End (value1) ─────► Finalize Video
-                                  │
-                                  └── writes final MP4 directly to output/
-```
-
----
-
-## Workflow Setup
-
-### 1️⃣ Prepare Input Directory
-
-Clips must follow this naming format:
-
-```
+```text
 clip_00001.mp4
 clip_00002.mp4
 clip_00003.mp4
-...
 ```
 
-The prefix (`clip`) is configurable in the Auto Joiner node.
+The prefix is configurable. For `wan_00001.mp4`, set `Filename Prefix` to
+`wan`.
 
-### 2️⃣ Set Loop Count
+All source clips should have the same width, height, and frame rate.
 
-For **N videos**, set:
+## Workflow Setup
 
-```
-For Loop Start → total = N - 1
-```
+Use the input settings nodes in the bundled example:
 
-| Videos | Loop Total |
-|--------|------------|
-| 3 | 2 |
-| 4 | 3 |
-| 5 | 4 |
-| 10 | 9 |
+| Setting node | Meaning |
+| --- | --- |
+| `Folder` | Folder containing numbered source clips |
+| `Filename Prefix` | Prefix before `_00001.mp4` |
+| `First Filename Suffix` | First clip number, usually `1` |
+| `Last Filename Suffix` | Last clip number |
+| `Width` / `Height` | Source video dimensions |
+| `Length` | VACE batch length; keep at `33` |
+| `Frame Rate` | Source/output FPS |
 
-### 3️⃣ Connect the Nodes
+Set `easy forLoopStart -> total` to:
 
-```
-For Loop Start ─────────────► For Loop End (flow)
-        │
-        ├── value1 ─► Save ─► initial_value1
-        │
-        └── index ─► Auto Joiner
-                           │
-                           ▼
-                      WAN VACE
-                           │
-                       VAE Decode
-                           │
-                           └──► Save
-
-After loop:
-For Loop End (value1) ─────► Finalize ─────► Video Combine
-                                  │              │
-                                  └── audio ─────┘
+```text
+Last Filename Suffix - First Filename Suffix
 ```
 
-### 4️⃣ Run Once
+Examples:
 
-Queue the workflow **one time** — the loop handles everything automatically.
+| Clips | First | Last | Loop total |
+| --- | ---: | ---: | ---: |
+| 3 | 1 | 3 | 2 |
+| 10 | 1 | 10 | 9 |
+| 71 | 1 | 71 | 70 |
 
----
+The loop wiring must preserve the barrier:
 
-## How Transition Smoothing Works
+```text
+easy forLoopStart index  -> WanVaceAutoJoiner loop_index
+easy forLoopStart value1 -> WanVaceAutoJoinerSave value1
+WanVaceAutoJoinerSave value1 -> easy forLoopEnd initial_value1
+easy forLoopEnd value1 -> WanVaceAutoJoinerFinalizeVideo loop_end_trigger
+```
 
-## Recovering an Interrupted Large Assembly
+Do not place either finalizer inside the loop.
 
-If ComfyUI exits after all VACE batches are written but before Video Combine
-finishes, recover from the temp PNG directory outside ComfyUI:
+## Recommended Finalizer
+
+`WanVaceAutoJoinerFinalizeVideo` writes a video directly and is the safest path
+for tens of clips.
+
+Important options:
+
+| Option | Default | Notes |
+| --- | ---: | --- |
+| `output_prefix` | `wanVaceJoined` | Final MP4 prefix in ComfyUI output |
+| `cleanup` | `false` | Keep false while testing; true deletes the temp PNG folder after success |
+| `correction_strength` | `0.75` | Overall adaptation amount; `0` disables correction |
+| `luma_strength` | `0.75` | Brightness/luminosity matching strength |
+| `chroma_strength` | `0.60` | Per-channel color/saturation matching strength |
+| `blend_region` | `30` | Context frames used for diagnostics and previews |
+| `anchor_window` | `12` | Frames before/after transition used as correction anchors |
+| `crf` | `12` | H.264 quality; lower is larger/better |
+| `pix_fmt` | `yuv420p` | Compatible default |
+| `transfer_audio` | `true` | Extracts, concatenates, and muxes source audio |
+
+The finalizer writes intermediate recovery data under the clip folder in a
+`recovery-*` directory. Unchanged frames are hardlinked when possible.
+
+## Legacy Finalizer and Memory Use
+
+`WanVaceAutoJoinerFinalize` still exists for small jobs that need the old
+`IMAGE -> VHS Video Combine` path. It must load all frames and return a
+float32 ComfyUI tensor.
+
+Approximate memory for the final `IMAGE` tensor:
+
+```text
+frames * width * height * 3 channels * 4 bytes
+```
+
+Example from a 71-clip run:
+
+```text
+14,952 frames * 768 * 1168 * 3 * 4 = about 149.9 GiB
+```
+
+That is only the output tensor, not counting decoded PNGs, smoothing copies,
+models, audio, Python overhead, or ffmpeg. For large jobs, use
+`WanVaceAutoJoinerFinalizeVideo` or `recover_assembly_video.py`.
+
+The legacy node has `max_tensor_gb` to stop unsafe runs before they exhaust RAM.
+
+## Color and Luminosity Correction
+
+WAN VACE can shift transition frames in saturation, per-channel balance, and
+overall luminosity. This can be more visible when source clips are already
+light, muted, or low saturation.
+
+The current correction estimates before/after anchor statistics and adjusts
+VACE transition frames toward a smooth target. It does not intentionally alter
+the normal source clip frames.
+
+Tuning guidance:
+
+| Symptom | Try |
+| --- | --- |
+| Transition too dark or too bright | Adjust `luma_strength` first |
+| Transition too saturated or color shifted | Adjust `chroma_strength` |
+| Correction looks too strong overall | Lower `correction_strength` |
+| Drift still visible | Raise `correction_strength` slightly, then luma/chroma |
+| Scene lighting changes naturally | Lower strengths to preserve the intended change |
+
+Good starting values:
+
+```text
+correction_strength = 0.75
+luma_strength = 0.75
+chroma_strength = 0.60
+blend_region = 30
+anchor_window = 12
+```
+
+Use the recovery script preview mode to test individual transitions before a
+full assembly.
+
+## Recovery Script
+
+If ComfyUI crashes or is stopped after the temp PNGs are written, recover the
+MP4 outside ComfyUI:
 
 ```bash
-/opt/comfy-env/bin/python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
-  --temp-dir /opt/comfy-env/comfy/output/clips-to-join/temp-YYYYMMDDHHMMSS \
-  --source-dir /opt/comfy-env/comfy/output/clips-to-join \
-  --file-prefix clips \
+python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
+  --temp-dir /path/to/clips/temp-YYYYMMDDHHMMSS \
+  --source-dir /path/to/clips \
+  --file-prefix clip \
   --first-suffix 1 \
   --last-suffix 71 \
-  --output /opt/comfy-env/comfy/output/wanVaceJoined_recovered.mp4 \
+  --output /path/to/output/wan_join_recovered.mp4 \
   --crf 12 \
   --pix-fmt yuv420p \
   --correction-strength 0.75 \
@@ -219,110 +213,110 @@ finishes, recover from the temp PNG directory outside ComfyUI:
   --overwrite
 ```
 
-Use `--analysis-only` first to write transition luma/saturation/RGB diagnostics
-without creating a new frame sequence. Use `--transition N --preview` to create
-short before/after MP4 previews for a specific transition. The script hardlinks
-unchanged PNGs into a recovery work directory and writes new PNGs only for
-corrected frames, so the original temp frames remain unchanged.
+Analyze without encoding:
 
-### The Problem
-VACE processes 33 frames per transition (16 from clip A + 17 from clip B). The diffusion process can shift brightness and color temperature, creating visible "pulses" at transition points.
+```bash
+python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
+  --temp-dir /path/to/clips/temp-YYYYMMDDHHMMSS \
+  --analysis-only
+```
 
-### The Solution
-v2.0.0 applies **temporal color smoothing**:
+Preview a single transition:
 
-1. **Analyzes** brightness and R/G/B values across the transition region
-2. **Creates smooth target curves** using Gaussian smoothing + linear interpolation
-3. **Calculates per-frame correction factors** dynamically from your source material
-4. **Applies corrections** to eliminate visible jumps
+```bash
+python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
+  --temp-dir /path/to/clips/temp-YYYYMMDDHHMMSS \
+  --transition 12 \
+  --preview \
+  --analysis-only
+```
 
-**Before:** Transitions show +3-6 point brightness jumps  
-**After:** Transitions show <1 point variation (imperceptible)
-
----
+The script writes JSON and CSV diagnostics for luma, saturation, and RGB drift.
+It preserves original PNGs and writes corrected frames into a separate recovery
+folder.
 
 ## Audio Handling
 
-| Scenario | Behavior |
-|----------|----------|
-| All clips have audio | Audio extracted and concatenated |
-| Some clips have audio | Available audio extracted |
-| No clips have audio | Silent track generated |
-| ffmpeg not installed | Silent track generated |
-| `transfer_audio` = False | Silent track generated |
+Both the new finalizer and recovery script:
 
-The audio output is **always valid** — you can permanently connect it to Video Combine without workflow errors.
+- extract each source clip to 44.1 kHz stereo PCM WAV,
+- concatenate the WAV files with ffmpeg,
+- encode video as H.264,
+- mux AAC audio into the final MP4 with video copy,
+- create silent audio only when no usable source audio is found.
 
----
+The legacy finalizer outputs a ComfyUI `AUDIO` object for VHS Video Combine.
 
 ## Troubleshooting
 
-### Transitions still visible
-- Increase `smooth_window` (try 15-20)
-- Increase `blend_region` (try 30-40)
-- Ensure `smooth_transitions` is enabled
+### The legacy finalizer says the tensor would exceed `max_tensor_gb`
 
-### No audio in output
-- Check if source clips have audio tracks
-- Verify ffmpeg is installed: `ffmpeg -version`
-- Check console for `[WAN VACE Auto Joiner]` messages
-
-### Loop exits early
-- Ensure `value1` passes through the Save node
-- Do not use FLOW_CONTROL for the barrier
+Use `WanVaceAutoJoinerFinalizeVideo` or the recovery script. Raising the limit
+only helps if the machine truly has enough free RAM for the float32 output
+tensor plus overhead.
 
 ### Finalize runs too early
-- Confirm Finalize is connected after For Loop End
-- Do not place Finalize inside the loop
 
----
+Connect `easy forLoopEnd value1` to the finalizer's `loop_end_trigger`. Keep
+`WanVaceAutoJoinerSave value1` connected to `easy forLoopEnd initial_value1`.
 
-## FAQ
+### Loop exits before all VACE batches are saved
 
-**Why temporal smoothing?**  
-VACE's diffusion process modifies all 33 frames, not just the masked region. This creates color/brightness inconsistencies that are visible to the human eye. Smoothing corrects these artifacts automatically.
+Check the `value1` barrier wiring. Do not replace it with FLOW_CONTROL.
 
-**Are the correction values hardcoded?**  
-No. All correction factors are calculated dynamically from your actual source frames at runtime. The algorithm adapts to any video content.
+### Transitions are still visible
 
-**Why not FLOW_CONTROL?**  
-FLOW_CONTROL does not block asynchronous WAN VACE execution. The `value1` barrier enforces true dependency completion.
+Generate per-transition previews with `recover_assembly_video.py`. Tune
+`luma_strength`, `chroma_strength`, and `correction_strength` on a few
+representative transitions before assembling the full video.
 
-**Can I disable smoothing?**  
-Yes, set `smooth_transitions` to False in the Finalize node. You'll get the raw VACE output.
+### No audio appears in the output
 
-**What if scipy isn't installed?**  
-The code falls back to a numpy-based Gaussian filter. Results are similar but scipy is slightly more accurate.
+Check that source clips have audio and that ffmpeg is available:
 
----
+```bash
+ffmpeg -version
+```
+
+## Installation
+
+Manual install:
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/Rhovanx/wan_vace_auto_joiner.git
+```
+
+Restart ComfyUI after installation or updates.
+
+For the local fork, use the repository remote configured in this checkout.
 
 ## Changelog
 
-### v2.0.0 (Major Release)
-- ✨ **NEW:** Temporal color smoothing for seamless transitions
-- ✨ **NEW:** Per-channel (R, G, B) correction
-- ✨ **NEW:** Audio transfer from original clips
-- ✨ **NEW:** Standard ComfyUI AUDIO output
-- ✨ **NEW:** Fail-safe silent audio generation
-- 🔒 Input sanitization for security
-- 📦 Dynamic correction (no hardcoded values)
+### Current
+
+- Added direct MP4 finalization for large workflows.
+- Added recovery script for interrupted PNG assemblies.
+- Added luma/chroma/overall correction controls.
+- Added tensor memory guard for the legacy finalizer.
+
+### v2.0.0
+
+- Added temporal color smoothing.
+- Added per-channel RGB correction.
+- Added audio transfer from original clips.
+- Added standard ComfyUI `AUDIO` output for Video Combine.
 
 ### v1.0.0
-- Initial release
-- Three-node system (Auto Joiner, Save, Finalize)
-- Loop barrier mechanism
-- Zero VACE overhead design
 
----
+- Initial three-node loop system.
+
+## Credits
+
+- WAN VACE: Alibaba's video-to-video consistency model.
+- ComfyUI-Easy-Use: loop nodes.
+- ComfyUI-VideoHelperSuite: legacy Video Combine compatibility.
 
 ## License
 
 MIT
-
----
-
-## Credits
-
-- **WAN VACE** — Alibaba's video-to-video consistency model
-- **ComfyUI-Easy-Use** — For Loop implementation
-- **ComfyUI-VideoHelperSuite** — Video Combine node compatibility
