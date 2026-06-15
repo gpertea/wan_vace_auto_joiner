@@ -42,6 +42,17 @@ def run_command(args: Sequence[str], *, input_data: Optional[bytes] = None) -> s
     return result
 
 
+def ffprobe_json(path: Path, entries: str) -> Dict[str, Any]:
+    result = run_command([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", entries,
+        "-of", "json",
+        str(path),
+    ])
+    return json.loads(result.stdout.decode("utf-8"))
+
+
 def load_state(temp_dir: Path) -> Dict[str, Any]:
     state_path = temp_dir / "state.json"
     if not state_path.exists():
@@ -390,26 +401,68 @@ def source_video_paths(source_dir: Path, prefix: str, first_suffix: int, last_su
     return [source_dir / f"{prefix}_{index:05d}.mp4" for index in range(first_suffix, last_suffix + 1)]
 
 
-def extract_combined_audio(video_paths: Sequence[Path], output_audio_path: Path) -> bool:
+def source_clip_duration(video_path: Path, fps: float) -> float:
+    metadata = ffprobe_json(
+        video_path,
+        "format=duration:stream=codec_type,duration,nb_frames,avg_frame_rate",
+    )
+    video_stream = next(
+        (stream for stream in metadata.get("streams", []) if stream.get("codec_type") == "video"),
+        {},
+    )
+    if fps > 0 and video_stream.get("nb_frames"):
+        try:
+            return int(video_stream["nb_frames"]) / fps
+        except ValueError:
+            pass
+    for source in (video_stream, metadata.get("format", {})):
+        if source.get("duration"):
+            return float(source["duration"])
+    raise RuntimeError(f"Unable to determine video duration for {video_path}")
+
+
+def has_audio_stream(video_path: Path) -> bool:
+    metadata = ffprobe_json(video_path, "stream=codec_type")
+    return any(stream.get("codec_type") == "audio" for stream in metadata.get("streams", []))
+
+
+def extract_duration_matched_audio(video_paths: Sequence[Path], output_audio_path: Path, *, fps: float) -> bool:
     output_audio_path.parent.mkdir(parents=True, exist_ok=True)
     temp_audio_files: List[Path] = []
     for index, video_path in enumerate(video_paths):
         if not video_path.exists():
             log(f"Missing source video for audio: {video_path}")
             continue
+        segment_duration = source_clip_duration(video_path, fps)
         temp_audio = output_audio_path.with_name(f"{output_audio_path.stem}_temp_{index:05d}.wav")
-        args = [
-            "ffmpeg",
-            "-v", "error",
-            "-y",
-            "-i", str(video_path),
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
-            str(temp_audio),
-        ]
-        result = subprocess.run(args, capture_output=True)
+        if has_audio_stream(video_path):
+            args = [
+                "ffmpeg",
+                "-v", "error",
+                "-y",
+                "-i", str(video_path),
+                "-vn",
+                "-af",
+                f"aresample=44100:async=1:first_pts=0,apad,atrim=0:{segment_duration:.6f},asetpts=PTS-STARTPTS",
+                "-acodec", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                str(temp_audio),
+            ]
+            result = subprocess.run(args, capture_output=True)
+        else:
+            args = [
+                "ffmpeg",
+                "-v", "error",
+                "-y",
+                "-f", "lavfi",
+                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-t", f"{segment_duration:.6f}",
+                "-acodec", "pcm_s16le",
+                str(temp_audio),
+            ]
+            result = subprocess.run(args, capture_output=True)
+
         if result.returncode == 0 and temp_audio.exists() and temp_audio.stat().st_size > 0:
             temp_audio_files.append(temp_audio)
         elif temp_audio.exists():
@@ -557,6 +610,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--analysis-only", action="store_true")
     parser.add_argument("--preview", action="store_true", help="Generate before/after preview clips for selected transitions")
     parser.add_argument("--no-audio", action="store_true")
+    parser.add_argument("--remux-audio-video", type=Path, help="Existing video file to remux with rebuilt duration-matched source audio")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
@@ -573,6 +627,26 @@ def main(argv: Sequence[str]) -> int:
     output = (args.output or Path.cwd() / f"wan_vace_recovered_{datetime.now():%Y%m%d%H%M%S}.mp4").resolve()
     work_dir = (args.work_dir or temp_dir / f"recovery-{datetime.now():%Y%m%d%H%M%S}").resolve()
     anchor_window = args.anchor_window if args.anchor_window is not None else args.blend_region
+
+    if args.remux_audio_video:
+        remux_source = args.remux_audio_video.resolve()
+        if not remux_source.exists():
+            raise FileNotFoundError(f"Missing remux source video: {remux_source}")
+        duration_seconds = float(
+            ffprobe_json(remux_source, "format=duration").get("format", {}).get("duration", 0.0)
+        )
+        audio_path = work_dir / "audio" / "duration_matched_audio.wav"
+        log(f"Rebuilding duration-matched audio for: {remux_source}")
+        if not extract_duration_matched_audio(
+            source_video_paths(source_dir, prefix, first_suffix, last_suffix),
+            audio_path,
+            fps=fps,
+        ):
+            log("No source audio extracted; creating silent audio track")
+            create_silent_audio(audio_path, duration_seconds)
+        mux_audio(remux_source, audio_path, output, duration_seconds=duration_seconds, overwrite=args.overwrite)
+        log(f"Audio-remuxed video written: {output}")
+        return 0
 
     frame_files = sorted_frame_files(temp_dir, prefix)
     regions = dedupe_regions(state.get("vace_regions", []), len(frame_files))
@@ -641,7 +715,11 @@ def main(argv: Sequence[str]) -> int:
         return 0
 
     audio_path = work_dir / "audio" / "combined_audio.wav"
-    if not extract_combined_audio(source_video_paths(source_dir, prefix, first_suffix, last_suffix), audio_path):
+    if not extract_duration_matched_audio(
+        source_video_paths(source_dir, prefix, first_suffix, last_suffix),
+        audio_path,
+        fps=fps,
+    ):
         log("No source audio extracted; creating silent audio track")
         create_silent_audio(audio_path, duration_seconds)
     mux_audio(no_audio_video, audio_path, output, duration_seconds=duration_seconds, overwrite=args.overwrite)

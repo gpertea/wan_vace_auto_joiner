@@ -240,10 +240,26 @@ folder.
 Both the new finalizer and recovery script:
 
 - extract each source clip to 44.1 kHz stereo PCM WAV,
-- concatenate the WAV files with ffmpeg,
+- pad or trim each clip's audio to its video frame duration,
+- concatenate the duration-matched WAV files with ffmpeg,
 - encode video as H.264,
 - mux AAC audio into the final MP4 with video copy,
 - create silent audio only when no usable source audio is found.
+
+This per-clip duration matching prevents small source audio underruns from
+accumulating into large sync drift across many joined clips.
+
+To repair audio on an existing recovered/video-only MP4 without reprocessing
+PNG frames:
+
+```bash
+python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
+  --temp-dir /path/to/clips/temp-YYYYMMDDHHMMSS \
+  --source-dir /path/to/clips \
+  --output /path/to/output/wan_join_audiofixed.mp4 \
+  --remux-audio-video /path/to/output/wan_join_recovered-video-only.mp4 \
+  --overwrite
+```
 
 The legacy finalizer outputs a ComfyUI `AUDIO` object for VHS Video Combine.
 
