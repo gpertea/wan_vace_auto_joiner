@@ -17,19 +17,22 @@ v2.0.0 - Major Release:
 from .wan_vace_auto_joiner import (
     WanVaceAutoJoiner,
     WanVaceAutoJoinerSave,
-    WanVaceAutoJoinerFinalize
+    WanVaceAutoJoinerFinalize,
+    WanVaceAutoJoinerFinalizeVideo
 )
 
 NODE_CLASS_MAPPINGS = {
     "WanVaceAutoJoiner": WanVaceAutoJoiner,
     "WanVaceAutoJoinerSave": WanVaceAutoJoinerSave,
-    "WanVaceAutoJoinerFinalize": WanVaceAutoJoinerFinalize
+    "WanVaceAutoJoinerFinalize": WanVaceAutoJoinerFinalize,
+    "WanVaceAutoJoinerFinalizeVideo": WanVaceAutoJoinerFinalizeVideo
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVaceAutoJoiner": "WAN VACE Auto Joiner",
     "WanVaceAutoJoinerSave": "WAN VACE Auto Joiner - Save",
-    "WanVaceAutoJoinerFinalize": "WAN VACE Auto Joiner - Finalize"
+    "WanVaceAutoJoinerFinalize": "WAN VACE Auto Joiner - Finalize",
+    "WanVaceAutoJoinerFinalizeVideo": "WAN VACE Auto Joiner - Finalize Video"
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

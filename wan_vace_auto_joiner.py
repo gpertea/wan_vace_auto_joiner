@@ -27,6 +27,7 @@ import glob
 import shutil
 import re
 import subprocess
+import sys
 from datetime import datetime
 from typing import Tuple, List, Optional, Dict, Any
 
@@ -62,6 +63,7 @@ NEXT_FRAMES = 17
 TOTAL_BATCH = 33
 MASK_START = 8
 MASK_END = 24
+DEFAULT_MAX_TENSOR_OUTPUT_GIB = 16.0
 
 
 # =============================================================================
@@ -243,6 +245,44 @@ def read_all_temp_frames(temp_folder: str, prefix: str) -> List[np.ndarray]:
     return frames
 
 
+def count_temp_frames(temp_folder: str, prefix: str) -> int:
+    """Count assembled PNG frames without decoding them."""
+    pattern = os.path.join(temp_folder, f"{prefix}_*.png")
+    return len(glob.glob(pattern))
+
+
+def dedupe_vace_regions(vace_regions: List[Dict[str, int]],
+                        frame_count: Optional[int] = None) -> List[Dict[str, int]]:
+    """Remove duplicate/invalid VACE regions while preserving chronological order."""
+    seen = set()
+    clean_regions = []
+
+    for region in vace_regions:
+        start = int(region.get("start", -1))
+        end = int(region.get("end", -1))
+        if start < 0 or end <= start:
+            continue
+        if frame_count is not None:
+            start = max(0, min(start, frame_count))
+            end = max(0, min(end, frame_count))
+            if end <= start:
+                continue
+        key = (start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        clean_regions.append({"start": start, "end": end})
+
+    clean_regions.sort(key=lambda item: (item["start"], item["end"]))
+    return clean_regions
+
+
+def estimate_tensor_output_gib(frame_count: int, width: int, height: int) -> float:
+    """Estimate ComfyUI IMAGE tensor memory for frames_to_tensor output."""
+    bytes_required = frame_count * width * height * 3 * 4
+    return bytes_required / (1024 ** 3)
+
+
 def frames_to_tensor(frames: List[np.ndarray]) -> torch.Tensor:
     """Convert list of numpy frames to ComfyUI tensor format."""
     if not frames:
@@ -315,11 +355,45 @@ def gaussian_smooth(data: np.ndarray, sigma: float) -> np.ndarray:
         return numpy_gaussian_filter1d(data, sigma)
 
 
+def calculate_color_gain(current_rgb: np.ndarray,
+                         target_rgb: np.ndarray,
+                         correction_strength: float,
+                         luma_strength: float,
+                         chroma_strength: float,
+                         min_gain: float = 0.75,
+                         max_gain: float = 1.25) -> np.ndarray:
+    """
+    Calculate bounded RGB gains with separate luma/chroma adaptation.
+
+    correction_strength scales the overall adjustment. luma_strength controls the
+    common brightness component, while chroma_strength controls per-channel color
+    balance after brightness is factored out.
+    """
+    current_rgb = np.maximum(current_rgb.astype(np.float32), 1.0)
+    target_rgb = np.maximum(target_rgb.astype(np.float32), 1.0)
+    channel_gain = target_rgb / current_rgb
+
+    luma_weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    current_luma = float(current_rgb @ luma_weights)
+    target_luma = float(target_rgb @ luma_weights)
+    luma_gain = target_luma / max(current_luma, 1.0)
+    chroma_gain = channel_gain / max(luma_gain, 1e-6)
+
+    combined_gain = (1.0 + luma_strength * (luma_gain - 1.0)) * (
+        1.0 + chroma_strength * (chroma_gain - 1.0)
+    )
+    gain = 1.0 + correction_strength * (combined_gain - 1.0)
+    return np.clip(gain, min_gain, max_gain).astype(np.float32)
+
+
 def temporal_smooth_color(frames: List[np.ndarray], 
                           transition_start: int, 
                           transition_end: int,
                           smooth_window: int = 12,
-                          blend_region: int = 25) -> List[np.ndarray]:
+                          blend_region: int = 25,
+                          correction_strength: float = 1.0,
+                          luma_strength: float = 1.0,
+                          chroma_strength: float = 1.0) -> List[np.ndarray]:
     """
     Apply temporal smoothing to R, G, B channels independently.
     
@@ -406,17 +480,21 @@ def temporal_smooth_color(frames: List[np.ndarray],
         idx = i - region_start
         frame = frames[i].astype(np.float32)
         
-        # Calculate per-channel correction factors
-        # These are computed dynamically from the actual frame data
-        r_factor = r_target[idx] / r_vals[idx] if r_vals[idx] > 0 else 1.0
-        g_factor = g_target[idx] / g_vals[idx] if g_vals[idx] > 0 else 1.0
-        b_factor = b_target[idx] / b_vals[idx] if b_vals[idx] > 0 else 1.0
+        current_rgb = np.array([r_vals[idx], g_vals[idx], b_vals[idx]], dtype=np.float32)
+        target_rgb = np.array([r_target[idx], g_target[idx], b_target[idx]], dtype=np.float32)
+        gains = calculate_color_gain(
+            current_rgb,
+            target_rgb,
+            correction_strength=correction_strength,
+            luma_strength=luma_strength,
+            chroma_strength=chroma_strength
+        )
         
         # Apply correction
         corrected = frame.copy()
-        corrected[:,:,0] = np.clip(frame[:,:,0] * r_factor, 0, 255)
-        corrected[:,:,1] = np.clip(frame[:,:,1] * g_factor, 0, 255)
-        corrected[:,:,2] = np.clip(frame[:,:,2] * b_factor, 0, 255)
+        corrected[:,:,0] = np.clip(frame[:,:,0] * gains[0], 0, 255)
+        corrected[:,:,1] = np.clip(frame[:,:,1] * gains[1], 0, 255)
+        corrected[:,:,2] = np.clip(frame[:,:,2] * gains[2], 0, 255)
         
         result_frames[i] = corrected.astype(np.uint8)
     
@@ -426,7 +504,10 @@ def temporal_smooth_color(frames: List[np.ndarray],
 def apply_all_transition_smoothing(frames: List[np.ndarray],
                                    vace_regions: List[Dict[str, int]],
                                    smooth_window: int = 12,
-                                   blend_region: int = 25) -> List[np.ndarray]:
+                                   blend_region: int = 25,
+                                   correction_strength: float = 1.0,
+                                   luma_strength: float = 1.0,
+                                   chroma_strength: float = 1.0) -> List[np.ndarray]:
     """
     Apply temporal color smoothing to all VACE transition regions.
     
@@ -447,7 +528,10 @@ def apply_all_transition_smoothing(frames: List[np.ndarray],
             region['start'],
             region['end'],
             smooth_window=smooth_window,
-            blend_region=blend_region
+            blend_region=blend_region,
+            correction_strength=correction_strength,
+            luma_strength=luma_strength,
+            chroma_strength=chroma_strength
         )
     
     return result
@@ -1038,6 +1122,34 @@ class WanVaceAutoJoinerFinalize:
                     "max": 50,
                     "tooltip": "Frames before/after VACE to include in smoothing (default 25)"
                 }),
+                "correction_strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "Overall color/luminosity correction strength (0 disables correction)"
+                }),
+                "luma_strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "How strongly brightness/luminosity continuity is corrected"
+                }),
+                "chroma_strength": ("FLOAT", {
+                    "default": 0.60,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "How strongly per-channel color/saturation drift is corrected"
+                }),
+                "max_tensor_gb": ("FLOAT", {
+                    "default": DEFAULT_MAX_TENSOR_OUTPUT_GIB,
+                    "min": 1.0,
+                    "max": 512.0,
+                    "step": 1.0,
+                    "tooltip": "Abort legacy IMAGE tensor output above this estimated memory use"
+                }),
                 "transfer_audio": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Transfer audio from original clips (requires ffmpeg)"
@@ -1050,6 +1162,10 @@ class WanVaceAutoJoinerFinalize:
                 smooth_transitions: bool = True,
                 smooth_window: int = 12,
                 blend_region: int = 25,
+                correction_strength: float = 0.75,
+                luma_strength: float = 0.75,
+                chroma_strength: float = 0.60,
+                max_tensor_gb: float = DEFAULT_MAX_TENSOR_OUTPUT_GIB,
                 transfer_audio: bool = True
                 ) -> Tuple[torch.Tensor, Any, float, str, bool]:
         """Finalize: Save final VACE output + Part K, apply smoothing, output all frames."""
@@ -1079,7 +1195,7 @@ class WanVaceAutoJoinerFinalize:
         last_suffix = state["last_suffix"]
         current_video_frames = state["current_video_frames"]
         num_transitions = state["num_transitions"]
-        vace_regions = state.get("vace_regions", [])
+        vace_regions = dedupe_vace_regions(state.get("vace_regions", []))
         
         print(f"[WAN VACE Auto Joiner Finalize] Step {num_transitions + 1}/{num_transitions + 1} (FINALIZE)")
         
@@ -1099,7 +1215,9 @@ class WanVaceAutoJoinerFinalize:
         
         # Track final VACE region position
         final_vace_start = frame_counter - 1
-        vace_regions.append({"start": final_vace_start, "end": final_vace_start + TOTAL_BATCH})
+        vace_regions = dedupe_vace_regions(
+            vace_regions + [{"start": final_vace_start, "end": final_vace_start + TOTAL_BATCH}]
+        )
         
         # Save final VACE frames
         vace_frames = tensor_to_frames(final_vace)
@@ -1118,6 +1236,17 @@ class WanVaceAutoJoinerFinalize:
                                                  file_prefix, frame_counter)
             print(f"[WAN VACE Auto Joiner Finalize] Saved Part K: {len(frames_k)} frames")
         
+        frame_file_count = count_temp_frames(temp_folder, file_prefix)
+        estimated_tensor_gib = estimate_tensor_output_gib(frame_file_count, state["width"], state["height"])
+        if estimated_tensor_gib > max_tensor_gb:
+            raise ValueError(
+                "Legacy Finalize would require approximately "
+                f"{estimated_tensor_gib:.1f} GiB for the output IMAGE tensor "
+                f"({frame_file_count} frames at {state['width']}x{state['height']}). "
+                "Use WAN VACE Auto Joiner - Finalize Video or recover_assembly_video.py "
+                "for large assemblies."
+            )
+
         # Read ALL frames from temp folder
         print(f"[WAN VACE Auto Joiner Finalize] Reading all frames from temp folder...")
         all_frames = read_all_temp_frames(temp_folder, file_prefix)
@@ -1137,7 +1266,10 @@ class WanVaceAutoJoinerFinalize:
                 all_frames,
                 vace_regions,
                 smooth_window=smooth_window,
-                blend_region=blend_region
+                blend_region=blend_region,
+                correction_strength=correction_strength,
+                luma_strength=luma_strength,
+                chroma_strength=chroma_strength
             )
             print(f"[WAN VACE Auto Joiner Finalize] Smoothing complete")
         
@@ -1202,3 +1334,238 @@ class WanVaceAutoJoinerFinalize:
         print(f"[WAN VACE Auto Joiner Finalize] {status}")
         
         return (batch_tensor, audio_output, fps, status, True)
+
+
+def ensure_final_frames_written(temp_folder: str,
+                                directory: str,
+                                file_prefix: str,
+                                state: Dict[str, Any],
+                                vace_images: Optional[torch.Tensor] = None
+                                ) -> Dict[str, Any]:
+    """
+    Save the final VACE tensor and last clip tail to PNGs when a run has just
+    finished its loop. If those PNGs already exist, leave them untouched so
+    recovery can resume from an interrupted finalization.
+    """
+    frame_counter = state["frame_counter"]
+    first_suffix = state["first_suffix"]
+    last_suffix = state["last_suffix"]
+    current_video_frames = state["current_video_frames"]
+    existing_frames = count_temp_frames(temp_folder, file_prefix)
+
+    vace_output_path = os.path.join(temp_folder, "vace_output.pt")
+    validate_path_within_directory(vace_output_path, temp_folder)
+
+    if not os.path.exists(vace_output_path) and vace_images is None:
+        if existing_frames > frame_counter:
+            print("[WAN VACE Auto Joiner Finalize Video] Final frames already appear to be written")
+            return state
+        raise ValueError("No final VACE output found. Save node must run after the last VACE batch.")
+
+    if os.path.exists(vace_output_path):
+        print("[WAN VACE Auto Joiner Finalize Video] Reading final VACE output from disk")
+        final_vace = torch.load(vace_output_path)
+        os.remove(vace_output_path)
+    elif vace_images is not None and vace_images.shape[0] >= TOTAL_BATCH:
+        print("[WAN VACE Auto Joiner Finalize Video] Using final VACE output from input")
+        final_vace = vace_images
+    else:
+        raise ValueError("Final VACE output is missing or has too few frames.")
+
+    final_vace_start = frame_counter - 1
+    vace_regions = dedupe_vace_regions(
+        state.get("vace_regions", []) + [{"start": final_vace_start, "end": final_vace_start + TOTAL_BATCH}]
+    )
+
+    vace_frames = tensor_to_frames(final_vace)
+    frame_counter = save_frames_to_temp(vace_frames, temp_folder, file_prefix, frame_counter)
+    print(f"[WAN VACE Auto Joiner Finalize Video] Saved final VACE: {len(vace_frames)} frames")
+
+    last_video_path = get_video_path(directory, file_prefix, last_suffix)
+    if current_video_frames > NEXT_FRAMES:
+        frames_k = read_video_frames(last_video_path, NEXT_FRAMES, current_video_frames)
+        frame_counter = save_frames_to_temp(frames_k, temp_folder, file_prefix, frame_counter)
+        print(f"[WAN VACE Auto Joiner Finalize Video] Saved Part K: {len(frames_k)} frames")
+
+    state["phase"] = "FINAL_FRAMES_WRITTEN"
+    state["frame_counter"] = frame_counter
+    state["vace_regions"] = vace_regions
+    save_state(temp_folder, state)
+    return state
+
+
+class WanVaceAutoJoinerFinalizeVideo:
+    """
+    Large-job finalizer that writes the final MP4 directly with ffmpeg.
+
+    This avoids returning the full assembled video as a ComfyUI IMAGE tensor,
+    which is the OOM failure mode for long clip sequences.
+    """
+
+    CATEGORY = "WAN VACE/Auto Joiner"
+    FUNCTION = "process"
+    RETURN_TYPES = ("STRING", "BOOLEAN")
+    RETURN_NAMES = ("status", "is_complete")
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "loop_end_trigger": ("*", {
+                    "tooltip": "Connect DIRECTLY to For Loop End's value1 output"
+                }),
+                "directory": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "Directory containing the video files (same as Auto Joiner)"
+                }),
+                "file_prefix": ("STRING", {
+                    "default": "clip",
+                    "multiline": False,
+                    "tooltip": "Prefix of the video files (same as Auto Joiner)"
+                }),
+                "output_prefix": ("STRING", {
+                    "default": "wanVaceJoined",
+                    "multiline": False,
+                    "tooltip": "Prefix for the recovered MP4 in ComfyUI output"
+                }),
+                "cleanup": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Delete temp folder after the MP4 is successfully written"
+                }),
+            },
+            "optional": {
+                "vace_images": ("IMAGE", {
+                    "tooltip": "Optional: Final VACE output (if not provided, reads from disk)"
+                }),
+                "correction_strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "Overall transition correction strength"
+                }),
+                "luma_strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "Brightness/luminosity correction strength"
+                }),
+                "chroma_strength": ("FLOAT", {
+                    "default": 0.60,
+                    "min": 0.0,
+                    "max": 1.5,
+                    "step": 0.05,
+                    "tooltip": "Per-channel color/saturation correction strength"
+                }),
+                "blend_region": ("INT", {
+                    "default": 30,
+                    "min": 10,
+                    "max": 80,
+                    "tooltip": "Context frames used for diagnostics and previews"
+                }),
+                "anchor_window": ("INT", {
+                    "default": 12,
+                    "min": 4,
+                    "max": 40,
+                    "tooltip": "Frames before/after transition used as correction anchors"
+                }),
+                "crf": ("INT", {
+                    "default": 12,
+                    "min": 0,
+                    "max": 100,
+                    "tooltip": "libx264 CRF quality value"
+                }),
+                "pix_fmt": (["yuv420p", "yuv420p10le"], {
+                    "default": "yuv420p",
+                    "tooltip": "Output pixel format"
+                }),
+                "transfer_audio": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Mux original clip audio into the final MP4"
+                }),
+            }
+        }
+
+    def process(self, loop_end_trigger, directory: str, file_prefix: str,
+                output_prefix: str, cleanup: bool,
+                vace_images: Optional[torch.Tensor] = None,
+                correction_strength: float = 0.75,
+                luma_strength: float = 0.75,
+                chroma_strength: float = 0.60,
+                blend_region: int = 30,
+                anchor_window: int = 12,
+                crf: int = 12,
+                pix_fmt: str = "yuv420p",
+                transfer_audio: bool = True
+                ) -> Tuple[str, bool]:
+        directory = validate_directory(directory)
+        file_prefix = sanitize_prefix(file_prefix)
+        output_prefix = sanitize_prefix(output_prefix)
+
+        temp_folder = find_temp_folder(directory)
+        if not temp_folder:
+            raise ValueError("No temp folder found. Processing must complete first.")
+        validate_path_within_directory(temp_folder, directory)
+
+        state = load_state(temp_folder)
+        if not state:
+            raise ValueError("No state file found.")
+
+        state = ensure_final_frames_written(temp_folder, directory, file_prefix, state, vace_images)
+
+        output_dir = COMFYUI_OUTPUT_DIR or os.path.join(os.getcwd(), "output")
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        output_path = os.path.join(output_dir, f"{output_prefix}_{timestamp}.mp4")
+        work_dir = os.path.join(directory, f"recovery-{timestamp}")
+        script_path = os.path.join(os.path.dirname(__file__), "recover_assembly_video.py")
+
+        cmd = [
+            sys.executable,
+            script_path,
+            "--temp-dir", temp_folder,
+            "--source-dir", directory,
+            "--file-prefix", file_prefix,
+            "--first-suffix", str(state["first_suffix"]),
+            "--last-suffix", str(state["last_suffix"]),
+            "--output", output_path,
+            "--work-dir", work_dir,
+            "--fps", str(state.get("fps", 24.0)),
+            "--crf", str(crf),
+            "--pix-fmt", pix_fmt,
+            "--correction-strength", str(correction_strength),
+            "--luma-strength", str(luma_strength),
+            "--chroma-strength", str(chroma_strength),
+            "--blend-region", str(blend_region),
+            "--anchor-window", str(anchor_window),
+            "--overwrite",
+        ]
+        if not transfer_audio:
+            cmd.append("--no-audio")
+
+        print("[WAN VACE Auto Joiner Finalize Video] Running recovery assembler...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="")
+        if result.returncode != 0:
+            raise RuntimeError(
+                "recover_assembly_video.py failed with exit code "
+                f"{result.returncode}. See Comfy log for details."
+            )
+
+        state["phase"] = "FINALIZED_VIDEO"
+        state["output_video"] = output_path
+        state["recovery_work_dir"] = work_dir
+        save_state(temp_folder, state)
+
+        if cleanup:
+            cleanup_temp_folder(temp_folder)
+            print("[WAN VACE Auto Joiner Finalize Video] Cleaned up temp folder")
+
+        status = f"DONE! Final video written to {output_path}"
+        print(f"[WAN VACE Auto Joiner Finalize Video] {status}")
+        return (status, True)

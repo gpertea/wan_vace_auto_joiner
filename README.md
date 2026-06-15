@@ -91,6 +91,7 @@ ffmpeg -version
 | `WanVaceAutoJoiner` | WAN VACE Auto Joiner | Inside loop | INIT (first iteration) / PROCESS (subsequent) |
 | `WanVaceAutoJoinerSave` | WAN VACE Auto Joiner – Save | Inside loop | Saves VACE output, acts as loop barrier |
 | `WanVaceAutoJoinerFinalize` | WAN VACE Auto Joiner – Finalize | After loop | Applies smoothing, outputs frames + audio |
+| `WanVaceAutoJoinerFinalizeVideo` | WAN VACE Auto Joiner – Finalize Video | After loop | Large-job path: streams corrected PNGs directly to MP4 |
 
 ---
 
@@ -101,8 +102,17 @@ ffmpeg -version
 | `smooth_transitions` | ✅ True | Enable temporal color smoothing |
 | `smooth_window` | 12 | Gaussian sigma (1-30, higher = smoother) |
 | `blend_region` | 25 | Context frames before/after VACE (10-50) |
+| `correction_strength` | 0.75 | Overall color/luminosity correction strength |
+| `luma_strength` | 0.75 | Brightness/luminosity matching strength |
+| `chroma_strength` | 0.60 | Per-channel color/saturation matching strength |
+| `max_tensor_gb` | 16 | Safety limit for legacy IMAGE tensor output |
 | `transfer_audio` | ✅ True | Extract audio from source clips |
 | `cleanup` | ❌ False | Delete temp folder after completion |
+
+> For long assemblies, use `WanVaceAutoJoinerFinalizeVideo` instead of the legacy
+> Finalize → Video Combine path. The legacy node must return every frame as a
+> ComfyUI `IMAGE` tensor; tens of 768x1168 clips can require more than 100 GiB
+> just for the output tensor.
 
 ---
 
@@ -115,6 +125,14 @@ WAN VACE Auto Joiner - Finalize
 ├── frame_rate ──────→ Video Combine (frame_rate)
 ├── status ──────────→ (optional debug output)
 └── is_complete ─────→ (optional boolean flag)
+```
+
+For large jobs:
+
+```
+For Loop End (value1) ─────► Finalize Video
+                                  │
+                                  └── writes final MP4 directly to output/
 ```
 
 ---
@@ -178,6 +196,34 @@ Queue the workflow **one time** — the loop handles everything automatically.
 ---
 
 ## How Transition Smoothing Works
+
+## Recovering an Interrupted Large Assembly
+
+If ComfyUI exits after all VACE batches are written but before Video Combine
+finishes, recover from the temp PNG directory outside ComfyUI:
+
+```bash
+/opt/comfy-env/bin/python custom_nodes/wan_vace_auto_joiner/recover_assembly_video.py \
+  --temp-dir /opt/comfy-env/comfy/output/clips-to-join/temp-YYYYMMDDHHMMSS \
+  --source-dir /opt/comfy-env/comfy/output/clips-to-join \
+  --file-prefix clips \
+  --first-suffix 1 \
+  --last-suffix 71 \
+  --output /opt/comfy-env/comfy/output/wanVaceJoined_recovered.mp4 \
+  --crf 12 \
+  --pix-fmt yuv420p \
+  --correction-strength 0.75 \
+  --luma-strength 0.75 \
+  --chroma-strength 0.60 \
+  --blend-region 30 \
+  --overwrite
+```
+
+Use `--analysis-only` first to write transition luma/saturation/RGB diagnostics
+without creating a new frame sequence. Use `--transition N --preview` to create
+short before/after MP4 previews for a specific transition. The script hardlinks
+unchanged PNGs into a recovery work directory and writes new PNGs only for
+corrected frames, so the original temp frames remain unchanged.
 
 ### The Problem
 VACE processes 33 frames per transition (16 from clip A + 17 from clip B). The diffusion process can shift brightness and color temperature, creating visible "pulses" at transition points.
