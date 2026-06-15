@@ -4,7 +4,7 @@ This folder contains three WAN VACE Auto Joiner examples.
 
 ## Recommended
 
-### `Wan Vace Auto Joiner WF_new_finalize.json`
+### `wan_vace_auto_joiner_finalize.json`
 
 Use this workflow for most jobs. It uses:
 
@@ -19,7 +19,7 @@ The finalizer writes the MP4 directly with ffmpeg and avoids returning the
 full frame sequence as a ComfyUI `IMAGE` tensor. This is the safe path for
 large batches and high-resolution clips.
 
-### `Wan Vace Auto Joiner WF_wan22_fun_vace_quality.json`
+### `wan_vace_auto_joiner_wan22_quality.json`
 
 Use this workflow when transition quality is more important than speed. It keeps
 the Auto Joiner loop and streaming finalizer, but replaces the Wan 2.1 VACE
@@ -48,7 +48,7 @@ detail and continuity.
 
 ## Legacy
 
-### `Wan Vace Auto Joiner WF.json`
+### `wan_vace_auto_joiner_legacy.json`
 
 This is the older small-job example. It uses:
 
@@ -61,7 +61,7 @@ assemblies.
 
 ## How to Use
 
-1. Load `Wan Vace Auto Joiner WF_new_finalize.json` or `Wan Vace Auto Joiner WF_wan22_fun_vace_quality.json` in ComfyUI.
+1. Load `wan_vace_auto_joiner_finalize.json` or `wan_vace_auto_joiner_wan22_quality.json` in ComfyUI.
 2. Set `Folder` to the directory containing your source clips.
 3. Set `Filename Prefix` to the part before `_00001.mp4`.
 4. Set `First Filename Suffix` and `Last Filename Suffix`.
