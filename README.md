@@ -52,10 +52,14 @@ The `examples/` folder contains:
 
 - `Wan Vace Auto Joiner WF_new_finalize.json`: recommended workflow using
   `WanVaceAutoJoinerFinalizeVideo`.
+- `Wan Vace Auto Joiner WF_wan22_fun_vace_quality.json`: quality workflow using
+  Wan 2.2 Fun VACE high/low-noise models, 20 steps, and no LightX2V LoRA.
 - `Wan Vace Auto Joiner WF.json`: legacy workflow using
   `WanVaceAutoJoinerFinalize` and VHS Video Combine.
 
-Use the `_new_finalize` workflow for large batches or high-resolution clips.
+Use the `_new_finalize` workflow for large batches or high-resolution clips. Use
+the Wan 2.2 quality workflow when preserving face texture, identity, and
+transition continuity matters more than speed.
 
 ## Input File Naming
 

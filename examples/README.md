@@ -1,6 +1,6 @@
 # Example Workflows
 
-This folder contains two WAN VACE Auto Joiner examples.
+This folder contains three WAN VACE Auto Joiner examples.
 
 ## Recommended
 
@@ -19,6 +19,33 @@ The finalizer writes the MP4 directly with ffmpeg and avoids returning the
 full frame sequence as a ComfyUI `IMAGE` tensor. This is the safe path for
 large batches and high-resolution clips.
 
+### `Wan Vace Auto Joiner WF_wan22_fun_vace_quality.json`
+
+Use this workflow when transition quality is more important than speed. It keeps
+the Auto Joiner loop and streaming finalizer, but replaces the Wan 2.1 VACE
+generation block with the Wan 2.2 Fun VACE high/low-noise setup from the batch
+clip-join workflow.
+
+Baseline settings:
+
+- high model: `WAN22/wan2.2_fun_vace_high_noise_14B_fp8_scaled.safetensors`
+- low model: `WAN22/wan2.2_fun_vace_low_noise_14B_fp8_scaled.safetensors`
+- sampler: two-stage `KSamplerAdvanced`
+- total steps: `20`
+- split: high noise `0-10`, low noise `10-20`
+- CFG: `1.5`
+- scheduler: `simple`
+- sampler: `euler`
+- shift: `5`
+- LightX2V: `false`
+- NAG: `false`
+- torch compile: `false`
+- sage attention: `true`
+
+Start with this baseline before tuning sampler, CFG, shift, or correction
+strengths. It intentionally disables the Lightning/LightX2V LoRAs to preserve
+detail and continuity.
+
 ## Legacy
 
 ### `Wan Vace Auto Joiner WF.json`
@@ -34,7 +61,7 @@ assemblies.
 
 ## How to Use
 
-1. Load `Wan Vace Auto Joiner WF_new_finalize.json` in ComfyUI.
+1. Load `Wan Vace Auto Joiner WF_new_finalize.json` or `Wan Vace Auto Joiner WF_wan22_fun_vace_quality.json` in ComfyUI.
 2. Set `Folder` to the directory containing your source clips.
 3. Set `Filename Prefix` to the part before `_00001.mp4`.
 4. Set `First Filename Suffix` and `Last Filename Suffix`.
