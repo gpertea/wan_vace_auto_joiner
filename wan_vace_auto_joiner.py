@@ -1396,6 +1396,10 @@ def ensure_final_frames_written(temp_folder: str,
     finished its loop. If those PNGs already exist, leave them untouched so
     recovery can resume from an interrupted finalization.
     """
+    if state.get("phase") in {"FINAL_FRAMES_WRITTEN", "FINALIZED_VIDEO"}:
+        print("[WAN VACE Auto Joiner Finalize Video] Final frames already written; skipping append")
+        return state
+
     frame_counter = state["frame_counter"]
     first_suffix = state["first_suffix"]
     last_suffix = state["last_suffix"]
@@ -1562,6 +1566,13 @@ class WanVaceAutoJoinerFinalizeVideo:
         state = load_state(temp_folder)
         if not state:
             raise ValueError("No state file found.")
+
+        if state.get("phase") == "FINALIZED_VIDEO":
+            output_video = state.get("output_video")
+            if output_video and os.path.exists(output_video):
+                status = f"DONE! Final video already written to {output_video}"
+                print(f"[WAN VACE Auto Joiner Finalize Video] {status}")
+                return (status, True)
 
         state = ensure_final_frames_written(temp_folder, directory, file_prefix, state, vace_images)
 
